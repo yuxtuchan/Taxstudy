@@ -24,7 +24,7 @@
       (window.SAMPLE_THEORIES || []).forEach((t) => s.theories.push(Object.assign({ id: uid(), createdAt: Date.now() }, t)));
     }
     s.progress = s.progress || {};
-    s.settings = Object.assign({ blankRatio: 0.4, ttsRate: 1.0, defaultMode: "cloze" }, s.settings || {});
+    s.settings = Object.assign({ blankRatio: 0.4, ttsRate: 1.0, defaultMode: "cloze", newPerDay: 10 }, s.settings || {});
     return s;
   }
   let db = load();
@@ -49,6 +49,25 @@
   function isDue(id) {
     const p = db.progress[id];
     return !p || !p.due || p.due <= today();
+  }
+  function isNew(id) {
+    const p = db.progress[id];
+    return !p || !p.history.length;
+  }
+  function dateOf(t) {
+    const d = new Date(t);
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  }
+  // 今日の復習：復習日が来た学習済みカード＋新しいカード（1日の上限まで、ランクの高い順）
+  function todaysQueue() {
+    const rankOrder = { A: 0, B: 1, C: 2 };
+    const byRank = (a, b) => (rankOrder[a.rank] ?? 3) - (rankOrder[b.rank] ?? 3);
+    const startedToday = Object.values(db.progress).filter((p) => p.history.length && dateOf(p.history[0].t) === today()).length;
+    const room = Math.max(0, (db.settings.newPerDay || 0) - startedToday);
+    const due = db.theories.filter((t) => !isNew(t.id) && isDue(t.id))
+      .sort((a, b) => (db.progress[a.id].due || "").localeCompare(db.progress[b.id].due || "") || byRank(a, b));
+    const fresh = db.theories.filter((t) => isNew(t.id)).sort(byRank).slice(0, room);
+    return due.concat(fresh).map((t) => t.id);
   }
   function rate(id, q, mode, score) {
     const p = prog(id);
@@ -165,6 +184,21 @@
     speechSynthesis.speak(u);
   }
 
+  // 同じ id のカードは追加しない
+  function mergeTheories(list, progress) {
+    const have = new Set(db.theories.map((t) => t.id));
+    let n = 0;
+    list.forEach((t) => {
+      if (!t || !t.id || !t.title || have.has(t.id)) return;
+      db.theories.push({ id: t.id, title: t.title, category: t.category || "", rank: t.rank || "B", body: t.body || "", createdAt: t.createdAt || Date.now() });
+      if (progress[t.id]) db.progress[t.id] = progress[t.id];
+      have.add(t.id); n++;
+    });
+    reviewQueue = null;
+    save();
+    return n;
+  }
+
   // ---------- 通知・確認（ブラウザのダイアログを使わない） ----------
   let toastTimer = null;
   function toast(msg) {
@@ -175,14 +209,16 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { el.hidden = true; }, 3200);
   }
-  function ask(msg, okLabel, onOk) {
+  function ask(msg, okLabel, onOk, alt) {
     const wrap = document.createElement("div");
     wrap.className = "modal";
     wrap.innerHTML = '<div class="modal-box" role="dialog" aria-modal="true"><p>' + esc(msg) + '</p><div class="row" style="justify-content:flex-end">' +
-      '<button id="ask-no">やめる</button><button class="primary danger-fill" id="ask-ok">' + esc(okLabel) + "</button></div></div>";
+      '<button id="ask-no">やめる</button>' + (alt ? '<button class="primary" id="ask-alt">' + esc(alt.label) + "</button>" : "") +
+      '<button class="primary danger-fill" id="ask-ok">' + esc(okLabel) + "</button></div></div>";
     document.body.appendChild(wrap);
     const close = () => wrap.remove();
     wrap.querySelector("#ask-no").onclick = close;
+    if (alt) wrap.querySelector("#ask-alt").onclick = () => { close(); alt.fn(); };
     wrap.onclick = (e) => { if (e.target === wrap) close(); };
     wrap.querySelector("#ask-ok").onclick = () => { close(); onOk(); };
     wrap.querySelector("#ask-ok").focus();
@@ -196,9 +232,15 @@
 
   function route() {
     if ("speechSynthesis" in window) speechSynthesis.cancel();
-    const h = location.hash.replace(/^#\/?/, "").split(/[-\/]/);
-    const dueCount = db.theories.filter((t) => isDue(t.id)).length;
-    document.getElementById("nav-review").textContent = "今日の復習" + (dueCount ? "（" + dueCount + "）" : "");
+    // #study-<id>、#study-<id>-<mode>、#edit-<id>（id に「-」が入ってもよい）
+    const raw = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
+    const m = raw.match(/^(study|edit)[-\/](.+)$/);
+    let h = [raw];
+    if (m) {
+      const mm = m[2].match(/^(.+)[-\/](read|cloze|random|initial|write)$/);
+      h = mm && find(mm[1]) ? [m[1], mm[1], mm[2]] : [m[1], m[2]];
+    }
+    updateNav();
     if (h[0] === "study" && find(h[1])) return viewStudy(find(h[1]), h[2] || db.settings.defaultMode);
     if (h[0] === "edit") return viewEdit(h[1] === "new" ? null : find(h[1]));
     if (h[0] === "review") return viewReview();
@@ -208,6 +250,10 @@
   }
   window.addEventListener("hashchange", route);
 
+  function updateNav() {
+    const n = todaysQueue().length;
+    document.getElementById("nav-review").textContent = "今日の復習" + (n ? "（" + n + "）" : "");
+  }
   function statusTag(id) {
     const p = db.progress[id];
     if (!p || !p.history.length) return '<span class="tag">未学習</span>';
@@ -224,7 +270,7 @@
     const cats = Array.from(new Set(db.theories.map((t) => t.category).filter(Boolean)));
     const total = db.theories.length;
     const studied = db.theories.filter((t) => db.progress[t.id] && db.progress[t.id].history.length).length;
-    const due = db.theories.filter((t) => isDue(t.id)).length;
+    const due = todaysQueue().length;
     const mastered = db.theories.filter((t) => db.progress[t.id] && db.progress[t.id].interval >= 7).length;
     app.innerHTML =
       '<div class="stats">' +
@@ -263,11 +309,9 @@
 
   function viewReview() {
     if (!reviewQueue) {
-      const rankOrder = { A: 0, B: 1, C: 2 };
-      reviewQueue = db.theories.filter((t) => isDue(t.id))
-        .sort((a, b) => ((db.progress[a.id] || {}).due || "").localeCompare((db.progress[b.id] || {}).due || "") || (rankOrder[a.rank] ?? 3) - (rankOrder[b.rank] ?? 3))
-        .map((t) => t.id);
+      reviewQueue = todaysQueue();
     }
+    updateNav();
     const next = reviewQueue.find((id) => find(id) && isDue(id));
     if (!next) {
       reviewQueue = null;
@@ -420,8 +464,13 @@
       "<h1>データ・設定</h1>" +
       '<div class="card"><h2 style="margin-top:0">学習設定</h2>' +
       '<label>復習のときに最初に開くモード</label><select id="dm">' + MODES.map(([k, l]) => '<option value="' + k + '"' + (k === db.settings.defaultMode ? " selected" : "") + ">" + l + "</option>").join("") + "</select>" +
+      '<label for="npd">1日に新しく覚えるカードの数（今日の復習に入る未学習カードの上限）</label><select id="npd">' +
+        [0, 5, 10, 15, 20, 30, 50].map((n) => '<option value="' + n + '"' + (n === db.settings.newPerDay ? " selected" : "") + ">" + n + "枚</option>").join("") + "</select>" +
       '<label>読み上げ速度：<span id="rv">' + db.settings.ttsRate + '</span></label><input type="range" id="rate" min="0.5" max="2" step="0.1" value="' + db.settings.ttsRate + '" style="width:100%">' +
       "</div>" +
+      '<div class="card"><h2 style="margin-top:0">条文カード</h2>' +
+      '<p class="muted">消費税法の本則（全条文）と別表を、条・項ごとのカードにしたものです。理論テキストで★★の規定はランクA、★はB、それ以外はCになっています。いまのデータに追加されます（追加済みのカードは重複しません）。</p>' +
+      '<div class="row"><button class="primary" id="addjobun">消費税法の条文カードを追加</button></div></div>' +
       '<div class="card"><h2 style="margin-top:0">バックアップ</h2>' +
       '<p class="muted">データはこのブラウザの中だけに保存されます。機種変更やブラウザのデータ削除に備えて、ときどき書き出してください。</p>' +
       '<div class="row"><button class="primary" id="exp">バックアップを表示</button><button id="dl">ファイルに保存</button><label class="btn" style="margin:0;color:var(--text)">ファイルから読み込む<input type="file" id="imp" accept=".json,application/json" hidden></label></div>' +
@@ -435,6 +484,16 @@
       '<textarea id="bulk" style="min-height:160px" placeholder="# 題名｜分野｜A\n本文……\n\n# 次の題名\n本文……"></textarea>' +
       '<div class="row" style="margin-top:8px"><button id="bulkadd">追加する</button></div></div>' +
       '<div class="card"><h2 style="margin-top:0">リセット</h2><div class="row"><button class="danger" id="resetp">学習記録だけ消す</button><button class="danger" id="resetall">すべて消してサンプルに戻す</button></div></div>';
+    document.getElementById("npd").onchange = (e) => { db.settings.newPerDay = Number(e.target.value); reviewQueue = null; save(); };
+    document.getElementById("addjobun").onclick = (e) => {
+      e.target.disabled = true;
+      fetch("data/jobun.json").then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }).then((d) => {
+        const n = mergeTheories(d.theories, {});
+        toast(n ? "条文カードを" + n + "枚追加しました" : "条文カードはすべて追加済みです");
+        if (n) location.hash = "#home";
+      }).catch(() => toast("条文データを読み込めませんでした。通信状態を確かめて、もう一度押してください"))
+        .finally(() => { e.target.disabled = false; });
+    };
     document.getElementById("dm").onchange = (e) => { db.settings.defaultMode = e.target.value; save(); };
     document.getElementById("rate").oninput = (e) => { db.settings.ttsRate = Number(e.target.value); document.getElementById("rv").textContent = e.target.value; save(); };
     document.getElementById("exp").onclick = () => {
@@ -470,12 +529,17 @@
         let d;
         try { d = JSON.parse(txt); } catch (err) { toast("JSONとして読み込めませんでした"); return; }
         if (!d || !Array.isArray(d.theories)) { toast("このツールのバックアップ形式ではありません"); return; }
-        ask("現在のデータを、読み込んだ内容（" + d.theories.length + "件）で置き換えますか？", "置き換える", () => {
+        ask("読み込んだ " + d.theories.length + " 件を、いまのデータに追加しますか？それとも、いまのデータをすべて置き換えますか？", "置き換える", () => {
           db = { theories: d.theories, progress: d.progress || {}, settings: Object.assign(db.settings, d.settings || {}) };
+          reviewQueue = null;
           save();
           toast("読み込みました");
           location.hash = "#home";
-        });
+        }, { label: "追加する", fn: () => {
+          const n = mergeTheories(d.theories, d.progress || {});
+          toast(n + "件追加しました（同じカードは追加していません）");
+          location.hash = "#home";
+        } });
       }
     }
     document.getElementById("bulkadd").onclick = () => {
