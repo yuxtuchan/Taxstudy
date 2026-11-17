@@ -29,7 +29,7 @@
   }
   let db = load();
   function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); } catch (e) { alert("保存に失敗しました（ブラウザの保存領域が使えません）"); }
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); } catch (e) { toast("保存に失敗しました。ブラウザの保存領域が使えません"); }
   }
   save();
 
@@ -157,12 +157,35 @@
 
   // ---------- 読み上げ ----------
   function speak(text) {
-    if (!("speechSynthesis" in window)) { alert("このブラウザは読み上げに対応していません"); return; }
+    if (!("speechSynthesis" in window)) { toast("このブラウザは読み上げに対応していません"); return; }
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(plain(text).replace(/（/g, "、").replace(/）/g, "、"));
     u.lang = "ja-JP";
     u.rate = db.settings.ttsRate;
     speechSynthesis.speak(u);
+  }
+
+  // ---------- 通知・確認（ブラウザのダイアログを使わない） ----------
+  let toastTimer = null;
+  function toast(msg) {
+    let el = document.getElementById("toast");
+    if (!el) { el = document.createElement("div"); el.id = "toast"; el.setAttribute("role", "status"); document.body.appendChild(el); }
+    el.textContent = msg;
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, 3200);
+  }
+  function ask(msg, okLabel, onOk) {
+    const wrap = document.createElement("div");
+    wrap.className = "modal";
+    wrap.innerHTML = '<div class="modal-box" role="dialog" aria-modal="true"><p>' + esc(msg) + '</p><div class="row" style="justify-content:flex-end">' +
+      '<button id="ask-no">やめる</button><button class="primary danger-fill" id="ask-ok">' + esc(okLabel) + "</button></div></div>";
+    document.body.appendChild(wrap);
+    const close = () => wrap.remove();
+    wrap.querySelector("#ask-no").onclick = close;
+    wrap.onclick = (e) => { if (e.target === wrap) close(); };
+    wrap.querySelector("#ask-ok").onclick = () => { close(); onOk(); };
+    wrap.querySelector("#ask-ok").focus();
   }
 
   // ---------- 画面 ----------
@@ -173,7 +196,7 @@
 
   function route() {
     if ("speechSynthesis" in window) speechSynthesis.cancel();
-    const h = location.hash.replace(/^#\/?/, "").split("/");
+    const h = location.hash.replace(/^#\/?/, "").split(/[-\/]/);
     const dueCount = db.theories.filter((t) => isDue(t.id)).length;
     document.getElementById("nav-review").textContent = "今日の復習" + (dueCount ? "（" + dueCount + "）" : "");
     if (h[0] === "study" && find(h[1])) return viewStudy(find(h[1]), h[2] || db.settings.defaultMode);
@@ -210,7 +233,7 @@
       '<div class="stat"><b>' + due + "</b><span>今日の復習</span></div>" +
       '<div class="stat"><b>' + mastered + "</b><span>定着（間隔7日以上）</span></div>" +
       "</div>" +
-      '<div class="row" style="margin-bottom:12px"><a class="btn primary" href="#/review">今日の復習を始める</a><a class="btn" href="#/edit/new">＋理論を追加</a></div>' +
+      '<div class="row" style="margin-bottom:12px"><a class="btn primary" href="#review">今日の復習を始める</a><a class="btn" href="#edit-new">＋理論を追加</a></div>' +
       '<div class="filters">' +
       '<input type="search" id="q" placeholder="題名・本文で検索" value="' + esc(homeFilter.q) + '">' +
       '<select id="cat"><option value="">全分野</option>' + cats.map((c) => "<option" + (c === homeFilter.cat ? " selected" : "") + ">" + esc(c) + "</option>").join("") + "</select>" +
@@ -226,10 +249,10 @@
         (!homeFilter.rank || t.rank === homeFilter.rank));
       list.innerHTML = items.length ? items.map((t) =>
         '<div class="card item">' +
-        '<div style="flex:1;min-width:0"><a class="title" href="#/study/' + t.id + '">' + esc(t.title) + "</a>" +
+        '<div style="flex:1;min-width:0"><a class="title" href="#study-' + t.id + '">' + esc(t.title) + "</a>" +
         '<div class="row muted" style="gap:6px">' + (t.rank ? '<span class="tag r' + t.rank + '">' + t.rank + "</span>" : "") +
         (t.category ? "<span>" + esc(t.category) + "</span>" : "") + statusTag(t.id) + histHtml(t.id) + "</div></div>" +
-        '<a class="btn" href="#/edit/' + t.id + '">編集</a></div>').join("")
+        '<a class="btn" href="#edit-' + t.id + '">編集</a></div>').join("")
         : '<div class="empty">該当する理論がありません</div>';
     }
     document.getElementById("q").oninput = (e) => { homeFilter.q = e.target.value; draw(); };
@@ -248,7 +271,7 @@
     const next = reviewQueue.find((id) => find(id) && isDue(id));
     if (!next) {
       reviewQueue = null;
-      app.innerHTML = '<div class="card empty"><h1>今日の復習は完了です</h1><p>おつかれさまでした。</p><a class="btn primary" href="#/">一覧へ戻る</a></div>';
+      app.innerHTML = '<div class="card empty"><h1>今日の復習は完了です</h1><p>おつかれさまでした。</p><a class="btn primary" href="#home">一覧へ戻る</a></div>';
       return;
     }
     viewStudy(find(next), db.settings.defaultMode, true);
@@ -256,10 +279,10 @@
 
   function viewStudy(t, mode, inReview) {
     let seed = Math.floor(Math.random() * 1e9);
-    const base = inReview ? "#/review" : "#/study/" + t.id;
+    const base = inReview ? "#review" : "#study-" + t.id;
     const remaining = inReview ? reviewQueue.filter((id) => find(id) && isDue(id)).length : 0;
     app.innerHTML =
-      '<div class="row"><a href="#/">← 一覧</a><span class="spacer"></span>' +
+      '<div class="row"><a href="#home">← 一覧</a><span class="spacer"></span>' +
       (inReview ? '<span class="muted">復習 残り ' + remaining + " 件</span>" : "") + "</div>" +
       "<h1>" + esc(t.title) + "</h1>" +
       '<div class="row muted">' + (t.rank ? '<span class="tag r' + t.rank + '">' + t.rank + "</span>" : "") + esc(t.category || "") + statusTag(t.id) + histHtml(t.id) + "</div>" +
@@ -271,7 +294,7 @@
       b.onclick = () => {
         mode = b.dataset.mode;
         app.querySelectorAll("[data-mode]").forEach((x) => x.classList.toggle("on", x === b));
-        if (!inReview) history.replaceState(null, "", base + "/" + mode);
+        if (!inReview) history.replaceState(null, "", base + "-" + mode);
         draw();
       };
     });
@@ -283,7 +306,7 @@
           if (Number(b.dataset.q) === 0) { reviewQueue = reviewQueue.filter((id) => id !== t.id).concat(t.id); }
           viewReview();
         } else {
-          location.hash = "#/";
+          location.hash = "#home";
         }
       };
     });
@@ -348,7 +371,7 @@
     t = t || { title: "", category: "", rank: "A", body: "" };
     const cats = Array.from(new Set(db.theories.map((x) => x.category).filter(Boolean)));
     app.innerHTML =
-      '<div class="row"><a href="#/">← 一覧</a></div>' +
+      '<div class="row"><a href="#home">← 一覧</a></div>' +
       "<h1>" + (isNew ? "理論を追加" : "理論を編集") + "</h1>" +
       '<div class="card">' +
       '<label>題名</label><input type="text" id="title" value="' + esc(t.title) + '" placeholder="例：仕入れに係る消費税額の控除">' +
@@ -359,7 +382,7 @@
       '<div class="row" style="margin-bottom:6px"><button id="wrap" type="button">選択範囲を【】で囲む</button><span class="muted">プレビュー：下に表示</span></div>' +
       '<textarea id="body">' + esc(t.body) + "</textarea>" +
       '<h2>プレビュー</h2><div class="theory" id="preview"></div>' +
-      '<div class="row" style="margin-top:14px"><button class="primary" id="save">保存</button><a class="btn" href="#/">キャンセル</a><span class="spacer"></span>' +
+      '<div class="row" style="margin-top:14px"><button class="primary" id="save">保存</button><a class="btn" href="#home">キャンセル</a><span class="spacer"></span>' +
       (isNew ? "" : '<button class="danger" id="del">削除</button>') + "</div></div>";
     const body = document.getElementById("body");
     const prev = document.getElementById("preview");
@@ -373,20 +396,22 @@
     };
     document.getElementById("save").onclick = () => {
       const title = document.getElementById("title").value.trim();
-      if (!title || !body.value.trim()) { alert("題名と本文を入力してください"); return; }
+      if (!title || !body.value.trim()) { toast("題名と本文を入力してください"); return; }
       const data = { title: title, category: document.getElementById("cat").value.trim(), rank: document.getElementById("rank").value, body: body.value, updatedAt: Date.now() };
       if (isNew) db.theories.push(Object.assign({ id: uid(), createdAt: Date.now() }, data));
       else Object.assign(t, data);
       save();
-      location.hash = "#/";
+      location.hash = "#home";
     };
     const del = document.getElementById("del");
     if (del) del.onclick = () => {
-      if (!confirm("「" + t.title + "」を削除しますか？学習記録も消えます。")) return;
-      db.theories = db.theories.filter((x) => x.id !== t.id);
-      delete db.progress[t.id];
-      save();
-      location.hash = "#/";
+      ask("「" + t.title + "」を削除しますか？学習記録も消えます。", "削除する", () => {
+        db.theories = db.theories.filter((x) => x.id !== t.id);
+        delete db.progress[t.id];
+        save();
+        toast("削除しました");
+        location.hash = "#home";
+      });
     };
   }
 
@@ -399,7 +424,12 @@
       "</div>" +
       '<div class="card"><h2 style="margin-top:0">バックアップ</h2>' +
       '<p class="muted">データはこのブラウザの中だけに保存されます。機種変更やブラウザのデータ削除に備えて、ときどき書き出してください。</p>' +
-      '<div class="row"><button class="primary" id="exp">JSONで書き出す</button><label class="btn" style="margin:0;color:var(--text)">JSONを読み込む<input type="file" id="imp" accept=".json,application/json" hidden></label></div></div>' +
+      '<div class="row"><button class="primary" id="exp">バックアップを表示</button><button id="dl">ファイルに保存</button><label class="btn" style="margin:0;color:var(--text)">ファイルから読み込む<input type="file" id="imp" accept=".json,application/json" hidden></label></div>' +
+      '<div id="expbox" hidden><label for="exptext">下の文字列をメモアプリなどに貼り付けて保管してください</label><textarea id="exptext" style="min-height:120px;font-size:12px" readonly></textarea>' +
+      '<div class="row" style="margin-top:6px"><button id="copy">コピー</button></div></div>' +
+      '<label for="imptext">バックアップの文字列を貼り付けて読み込む</label><textarea id="imptext" style="min-height:70px;font-size:12px" placeholder="{&quot;theories&quot;: …}"></textarea>' +
+      '<div class="row" style="margin-top:6px"><button id="impbtn">貼り付けた内容を読み込む</button></div>' +
+      '<p class="muted">「ファイルに保存」は claude.ai 上では動かないことがあります。そのときは「バックアップを表示」からコピーしてください。</p></div>' +
       '<div class="card"><h2 style="margin-top:0">まとめて追加（テキスト）</h2>' +
       '<p class="muted">「# 題名」の行で理論を区切って貼り付けます。題名の後ろに「｜分野｜ランク」を付けられます。<br>例：<code># 課税の対象｜総則｜A</code></p>' +
       '<textarea id="bulk" style="min-height:160px" placeholder="# 題名｜分野｜A\n本文……\n\n# 次の題名\n本文……"></textarea>' +
@@ -408,6 +438,20 @@
     document.getElementById("dm").onchange = (e) => { db.settings.defaultMode = e.target.value; save(); };
     document.getElementById("rate").oninput = (e) => { db.settings.ttsRate = Number(e.target.value); document.getElementById("rv").textContent = e.target.value; save(); };
     document.getElementById("exp").onclick = () => {
+      const box = document.getElementById("expbox");
+      box.hidden = false;
+      const ta = document.getElementById("exptext");
+      ta.value = JSON.stringify(db);
+      ta.focus(); ta.select();
+    };
+    document.getElementById("copy").onclick = () => {
+      const ta = document.getElementById("exptext");
+      const fallback = () => { ta.focus(); ta.select(); toast("選択しました。長押しまたは Ctrl+C でコピーしてください"); };
+      try {
+        navigator.clipboard.writeText(ta.value).then(() => toast("コピーしました"), fallback);
+      } catch (e) { fallback(); }
+    };
+    document.getElementById("dl").onclick = () => {
       const blob = new Blob([JSON.stringify(db, null, 2)], { type: "application/json" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -418,16 +462,22 @@
     document.getElementById("imp").onchange = (e) => {
       const f = e.target.files[0];
       if (!f) return;
-      f.text().then((txt) => {
-        let d;
-        try { d = JSON.parse(txt); } catch (err) { alert("JSONとして読み込めませんでした"); return; }
-        if (!d || !Array.isArray(d.theories)) { alert("このツールのバックアップ形式ではありません"); return; }
-        if (!confirm("現在のデータを読み込んだ内容で置き換えますか？")) return;
-        db = { theories: d.theories, progress: d.progress || {}, settings: Object.assign(db.settings, d.settings || {}) };
-        save();
-        location.hash = "#/";
-      });
+      f.text().then(importText);
     };
+    document.getElementById("impbtn").onclick = () => importText(document.getElementById("imptext").value);
+    function importText(txt) {
+      {
+        let d;
+        try { d = JSON.parse(txt); } catch (err) { toast("JSONとして読み込めませんでした"); return; }
+        if (!d || !Array.isArray(d.theories)) { toast("このツールのバックアップ形式ではありません"); return; }
+        ask("現在のデータを、読み込んだ内容（" + d.theories.length + "件）で置き換えますか？", "置き換える", () => {
+          db = { theories: d.theories, progress: d.progress || {}, settings: Object.assign(db.settings, d.settings || {}) };
+          save();
+          toast("読み込みました");
+          location.hash = "#home";
+        });
+      }
+    }
     document.getElementById("bulkadd").onclick = () => {
       const txt = document.getElementById("bulk").value;
       const blocks = txt.split(/^#\s*/m).map((b) => b.trim()).filter(Boolean);
@@ -442,17 +492,17 @@
         n++;
       });
       save();
-      alert(n + "件追加しました");
-      if (n) location.hash = "#/";
+      toast(n ? n + "件追加しました" : "追加できる理論がありませんでした。「# 題名」の次の行から本文を書いてください");
+      if (n) location.hash = "#home";
     };
     document.getElementById("resetp").onclick = () => {
-      if (!confirm("学習記録をすべて消しますか？")) return;
-      db.progress = {}; save(); alert("消去しました");
+      ask("学習記録をすべて消しますか？登録した理論は残ります。", "消す", () => { db.progress = {}; save(); toast("学習記録を消しました"); });
     };
     document.getElementById("resetall").onclick = () => {
-      if (!confirm("登録した理論も含めてすべて消えます。よろしいですか？")) return;
-      try { localStorage.removeItem(STORE_KEY); } catch (e) { /* 無視 */ }
-      db = load(); save(); location.hash = "#/";
+      ask("登録した理論も含めてすべて消えます。よろしいですか？", "すべて消す", () => {
+        try { localStorage.removeItem(STORE_KEY); } catch (e) { /* 無視 */ }
+        db = load(); save(); toast("サンプルの状態に戻しました"); location.hash = "#home";
+      });
     };
   }
 
