@@ -188,3 +188,6 @@ a.card.item:hover { border-color: var(--accent); }
 .tag.lv0 { color: var(--danger); border-color: var(--danger); }
 .tag.lv1 { color: var(--warn); border-color: var(--warn); }
 .tag.lv2 { color: var(--ok); border-color: var(--ok); }
+.btn.open { padding: 10px 18px; font-weight: 600; white-space: nowrap; }
+.editlink { font-size: 12px; color: var(--muted); text-decoration: underline; margin-left: auto; padding: 2px 4px; }
+.editlink:hover { color: var(--accent); }

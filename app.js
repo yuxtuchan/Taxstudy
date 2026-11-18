@@ -3,9 +3,7 @@
   const STORE_KEY = "taxstudy.v1";
   const MODES = [
     ["read", "全文"],
-    ["cloze", "キーワード穴埋め"],
-    ["random", "ランダム穴埋め"],
-    ["initial", "頭文字"],
+    ["random", "穴埋め"],
     ["write", "書き出し"],
   ];
   const RATES = [
@@ -23,7 +21,9 @@
       s = { theories: [], progress: {}, settings: {} };
     }
     s.progress = s.progress || {};
-    s.settings = Object.assign({ blankRatio: 0.4, ttsRate: 1.0, defaultMode: "cloze", newPerDay: 10 }, s.settings || {});
+    s.settings = Object.assign({ blankRatio: 0.4, ttsRate: 1.0, defaultMode: "random", newPerDay: 10 }, s.settings || {});
+    // なくしたモード（キーワード穴埋め・頭文字）が設定に残っていたら穴埋めにする
+    if (!["read", "random", "write"].includes(s.settings.defaultMode)) s.settings.defaultMode = "random";
     return s;
   }
   let db = load();
@@ -62,7 +62,8 @@
   function sectionsOf(t) {
     const secs = []; const pre = [];
     t.body.split("\n").forEach((ln) => {
-      if (/^〔[^〕]+〕/.test(ln.trim())) secs.push({ head: ln.trim(), lines: [] });
+      // 見出しは行頭の「〔1〕国内取引」。字下げした「〔１〕は、…」のような参照は本文として扱う
+      if (/^〔[^〕]+〕(?![はのにをがともでや、。及又若並・〔])/.test(ln)) secs.push({ head: ln.trim(), lines: [] });
       else if (secs.length) secs[secs.length - 1].lines.push(ln);
       else pre.push(ln);
     });
@@ -380,8 +381,9 @@
         '<div class="card item">' +
         '<div style="flex:1;min-width:0"><a class="title" href="#study-' + t.id + '">' + esc(t.title) + "</a>" +
         '<div class="row muted" style="gap:6px">' + (t.rank ? '<span class="tag r' + t.rank + '">' + t.rank + "</span>" : "") +
-        (t.category ? "<span>" + esc(t.category) + "</span>" : "") + cardStatus(t) + "</div></div>" +
-        '<a class="btn" href="#edit-' + t.id + '">編集</a></div>').join("")
+        (t.category ? "<span>" + esc(t.category) + "</span>" : "") + cardStatus(t) +
+        '<a class="editlink" href="#edit-' + t.id + '">編集</a></div></div>' +
+        '<a class="btn primary open" href="#study-' + t.id + '">開く</a></div>').join("")
         : db.theories.length ? '<div class="empty">該当する理論がありません</div>'
         : '<div class="empty">まだ理論がありません。<br>「データ」→「ファイルから読み込む」で理論テキストのファイルを読み込むか、「＋追加」から登録してください。<br><br><a class="btn primary" href="#data">データ画面へ</a></div>';
     }
@@ -422,8 +424,8 @@
 
   function viewStudy(t, mode, inReview) {
     let seed = Math.floor(Math.random() * 1e9);
-    // 【】の印がない本文では、キーワード穴埋めの代わりにランダム穴埋めで開く
-    if (mode === "cloze" && !/【[^】]+】/.test(t.body)) mode = "random";
+    // 今はないモードを指定されたら穴埋めで開く
+    if (!MODES.some(([k]) => k === mode)) mode = "random";
     const base = inReview ? "#review" : t.whole ? "#whole-" + t.card.id : t.n ? "#sec-" + t.id : "#study-" + t.id;
     const back = !inReview && t.n ? "#study-" + t.card.id : t.whole ? "#study-" + t.card.id : "#home";
     const remaining = inReview ? reviewQueue.filter((id) => findUnit(id) && isDue(id)).length : 0;
@@ -489,7 +491,7 @@
       let draft = "";
       try { draft = sessionStorage.getItem(draftKey) || ""; } catch (e) { draft = ""; }
       stage.innerHTML =
-        '<p class="muted" style="margin-top:0">題名だけを見て、本文を思い出して書いてください（空白・改行・【】・条文番号だけの行は判定に含めません）。</p>' +
+        '<p class="muted" style="margin-top:0">題名だけを見て、本文を思い出して書いてください（空白・改行・条文番号だけの行は判定に含めません）。</p>' +
         '<textarea id="ans" placeholder="ここに書き出す">' + esc(draft) + "</textarea>" +
         '<div class="row" style="margin-top:8px"><button class="primary" id="check">判定する</button><button id="clear">消去</button></div>' +
         '<div id="result"></div>';
@@ -526,8 +528,7 @@
       '<div class="row" style="align-items:flex-start"><div style="flex:2;min-width:180px"><label>分野</label><input type="text" id="cat" list="cats" value="' + esc(t.category || "") + '" placeholder="例：仕入税額控除">' +
       '<datalist id="cats">' + cats.map((c) => "<option>" + esc(c) + "</option>").join("") + "</datalist></div>" +
       '<div style="flex:1;min-width:100px"><label>重要度</label><select id="rank">' + ["A", "B", "C"].map((r) => "<option" + (r === t.rank ? " selected" : "") + ">" + r + "</option>").join("") + "</select></div></div>" +
-      '<label>本文（覚えたい語句を【】で囲むと「キーワード穴埋め」の空欄になります）</label>' +
-      '<div class="row" style="margin-bottom:6px"><button id="wrap" type="button">選択範囲を【】で囲む</button><span class="muted">プレビュー：下に表示</span></div>' +
+      '<label>本文（「〔1〕国内取引」のように行頭に〔〕の見出しを書くと、項目ごとに分かれます）</label>' +
       '<textarea id="body">' + esc(t.body) + "</textarea>" +
       '<h2>プレビュー</h2><div class="theory" id="preview"></div>' +
       '<div class="row" style="margin-top:14px"><button class="primary" id="save">保存</button><a class="btn" href="#home">キャンセル</a><span class="spacer"></span>' +
@@ -536,12 +537,6 @@
     const prev = document.getElementById("preview");
     const upd = () => { prev.innerHTML = render(body.value, "read"); };
     body.oninput = upd; upd();
-    document.getElementById("wrap").onclick = () => {
-      const s = body.selectionStart, e = body.selectionEnd;
-      if (s === e) return;
-      body.setRangeText("【" + body.value.slice(s, e) + "】", s, e, "end");
-      body.focus(); upd();
-    };
     document.getElementById("save").onclick = () => {
       const title = document.getElementById("title").value.trim();
       if (!title || !body.value.trim()) { toast("題名と本文を入力してください"); return; }
