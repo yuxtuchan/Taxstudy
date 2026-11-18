@@ -21,7 +21,7 @@
       s = { theories: [], progress: {}, settings: {} };
     }
     s.progress = s.progress || {};
-    s.settings = Object.assign({ blankRatio: 0.4, ttsRate: 1.0, defaultMode: "random", newPerDay: 10 }, s.settings || {});
+    s.settings = Object.assign({ defaultMode: "random", newPerDay: 10 }, s.settings || {});
     // なくしたモード（キーワード穴埋め・頭文字）が設定に残っていたら穴埋めにする
     if (!["read", "random", "write"].includes(s.settings.defaultMode)) s.settings.defaultMode = "random";
     return s;
@@ -140,7 +140,8 @@
     const shown = hint ? esc(hint) + "○".repeat(Math.max(0, ans.length - hint.length)) : esc(ans);
     return '<span class="blank' + (hint ? " hint" : "") + '" style="min-width:' + w + '" data-ans="' + esc(ans) + '">' + shown + "</span>";
   }
-  function render(body, mode, seed) {
+  const DEFAULT_RATIO = 0.8; // 穴埋めを開いたときの隠す割合
+  function render(body, mode, seed, ratio) {
     const segs = parse(body);
     if (mode === "read") {
       return segs.map((s) => (s.key ? '<span class="key">' + esc(s.text) + "</span>" : esc(s.text))).join("");
@@ -150,7 +151,7 @@
     }
     // random / initial: 漢字・カタカナ語を対象
     const rnd = mulberry(seed);
-    const ratio = db.settings.blankRatio;
+    ratio = ratio == null ? DEFAULT_RATIO : ratio;
     return segs.map((s) => {
       return (s.text.match(RUN_RE) || []).map((run) => {
         const isWord = WORD_RE.test(run) && run.length >= 2;
@@ -200,16 +201,6 @@
     while (j < m) push("extra", b[j++]);
     const score = n ? Math.round((dp[0][0] / n) * 100) : 0;
     return { ops: ops, score: score };
-  }
-
-  // ---------- 読み上げ ----------
-  function speak(text) {
-    if (!("speechSynthesis" in window)) { toast("このブラウザは読み上げに対応していません"); return; }
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(plain(text).replace(/（/g, "、").replace(/）/g, "、"));
-    u.lang = "ja-JP";
-    u.rate = db.settings.ttsRate;
-    speechSynthesis.speak(u);
   }
 
   // 以前の版で入った条文カード（id が jobun-）と、編集していない初期サンプル
@@ -275,7 +266,6 @@
   let reviewQueue = null;
 
   function route() {
-    if ("speechSynthesis" in window) speechSynthesis.cancel();
     // #study-<id>、#study-<id>-<mode>、#edit-<id>（id に「-」が入ってもよい）
     const raw = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
     // #sec-<カードid~番号>、#whole-<カードid> も同じ形
@@ -424,6 +414,7 @@
 
   function viewStudy(t, mode, inReview) {
     let seed = Math.floor(Math.random() * 1e9);
+    let ratio = DEFAULT_RATIO; // 開くたびに80%から
     // 今はないモードを指定されたら穴埋めで開く
     if (!MODES.some(([k]) => k === mode)) mode = "random";
     const base = inReview ? "#review" : t.whole ? "#whole-" + t.card.id : t.n ? "#sec-" + t.id : "#study-" + t.id;
@@ -469,9 +460,9 @@
         '<div class="row" style="margin-bottom:10px">' +
         (mode !== "read" ? '<button id="reveal">すべて表示</button><button id="hide">すべて隠す</button>' : "") +
         (mode === "random" ? '<button id="shuffle">別の穴</button><label style="margin:0">隠す割合 <select id="ratio" style="width:auto">' +
-          [0.2, 0.4, 0.6, 0.8, 1].map((r) => '<option value="' + r + '"' + (r === db.settings.blankRatio ? " selected" : "") + ">" + r * 100 + "%</option>").join("") + "</select></label>" : "") +
-        '<span class="spacer"></span><button id="tts">▶ 読み上げ</button></div>';
-      stage.innerHTML = tools + '<div class="theory">' + render(t.body, mode, seed) + "</div>" +
+          [0.2, 0.4, 0.6, 0.8, 1].map((r) => '<option value="' + r + '"' + (r === ratio ? " selected" : "") + ">" + r * 100 + "%</option>").join("") + "</select></label>" : "") +
+        "</div>";
+      stage.innerHTML = tools + '<div class="theory">' + render(t.body, mode, seed, ratio) + "</div>" +
         (mode !== "read" ? '<p class="muted">空欄をタップすると答えが出ます。</p>' : "");
       stage.querySelectorAll(".blank").forEach((el) => {
         el.onclick = () => {
@@ -483,8 +474,7 @@
       const r = document.getElementById("reveal"); if (r) r.onclick = () => setAll(true);
       const hd = document.getElementById("hide"); if (hd) hd.onclick = () => setAll(false);
       const sh = document.getElementById("shuffle"); if (sh) sh.onclick = () => { seed++; draw(); };
-      const ra = document.getElementById("ratio"); if (ra) ra.onchange = (e) => { db.settings.blankRatio = Number(e.target.value); save(); draw(); };
-      document.getElementById("tts").onclick = () => speak(t.body);
+      const ra = document.getElementById("ratio"); if (ra) ra.onchange = (e) => { ratio = Number(e.target.value); draw(); };
     }
     function drawWrite() {
       const draftKey = "taxstudy.draft." + t.id;
@@ -565,7 +555,6 @@
       '<label>復習のときに最初に開くモード</label><select id="dm">' + MODES.map(([k, l]) => '<option value="' + k + '"' + (k === db.settings.defaultMode ? " selected" : "") + ">" + l + "</option>").join("") + "</select>" +
       '<label for="npd">1日に新しく覚えるカードの数（今日の復習に入る未学習カードの上限）</label><select id="npd">' +
         [0, 5, 10, 15, 20, 30, 50].map((n) => '<option value="' + n + '"' + (n === db.settings.newPerDay ? " selected" : "") + ">" + n + "枚</option>").join("") + "</select>" +
-      '<label>読み上げ速度：<span id="rv">' + db.settings.ttsRate + '</span></label><input type="range" id="rate" min="0.5" max="2" step="0.1" value="' + db.settings.ttsRate + '" style="width:100%">' +
       "</div>" +
       (legacyCards().length ? '<div class="card"><h2 style="margin-top:0">条文カード・サンプルの削除</h2>' +
         '<p class="muted">以前の版で入った、消費税法の条文から作ったカードと、最初から入っていたサンプルが ' + legacyCards().length + ' 枚あります。理論テキストのカードと、自分で編集したカードは消えません。</p>' +
@@ -597,7 +586,6 @@
       });
     };
     document.getElementById("dm").onchange = (e) => { db.settings.defaultMode = e.target.value; save(); };
-    document.getElementById("rate").oninput = (e) => { db.settings.ttsRate = Number(e.target.value); document.getElementById("rv").textContent = e.target.value; save(); };
     document.getElementById("exp").onclick = () => {
       const box = document.getElementById("expbox");
       box.hidden = false;
