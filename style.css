@@ -182,3 +182,9 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
   background: var(--text); color: var(--bg);
   padding: 9px 16px; border-radius: 8px; font-size: 14px;
 }
+a.card.item { text-decoration: none; color: var(--text); }
+a.card.item:hover { border-color: var(--accent); }
+.chev { font-size: 22px; color: var(--muted); }
+.tag.lv0 { color: var(--danger); border-color: var(--danger); }
+.tag.lv1 { color: var(--warn); border-color: var(--warn); }
+.tag.lv2 { color: var(--ok); border-color: var(--ok); }

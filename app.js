@@ -57,15 +57,43 @@
     const d = new Date(t);
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
   }
-  // 今日の復習：復習日が来た学習済みカード＋新しいカード（1日の上限まで、ランクの高い順）
+  // ---------- 問題と項目 ----------
+  // 本文の「〔1〕…」の行で項目に分ける。〔〕がない理論は全体で1項目
+  function sectionsOf(t) {
+    const secs = []; const pre = [];
+    t.body.split("\n").forEach((ln) => {
+      if (/^〔[^〕]+〕/.test(ln.trim())) secs.push({ head: ln.trim(), lines: [] });
+      else if (secs.length) secs[secs.length - 1].lines.push(ln);
+      else pre.push(ln);
+    });
+    if (!secs.length) return [{ n: 0, head: "", body: t.body }];
+    if (pre.join("").trim()) secs[0].lines = pre.concat(secs[0].lines);
+    return secs.map((x, i) => ({ n: i + 1, head: x.head, body: x.lines.join("\n") }));
+  }
+  // 項目ごとの学習記録は「カードid~番号」で持つ（項目が1つだけの理論はカードidのまま）
+  function unitsOf(t) {
+    return sectionsOf(t).map((x) => ({
+      id: x.n ? t.id + "~" + x.n : t.id, card: t, n: x.n, head: x.head,
+      title: x.n ? t.title + " " + x.head : t.title, body: x.body, rank: t.rank, category: t.category,
+    }));
+  }
+  function allUnits() { return db.theories.reduce((a, t) => a.concat(unitsOf(t)), []); }
+  function findUnit(id) {
+    const i = String(id).lastIndexOf("~");
+    const t = find(i >= 0 ? id.slice(0, i) : id);
+    return t ? unitsOf(t).find((u) => u.id === id) || null : null;
+  }
+
+  // 今日の復習：復習日が来た学習済みの項目＋新しい項目（1日の上限まで、ランクの高い順）
   function todaysQueue() {
     const rankOrder = { A: 0, B: 1, C: 2 };
     const byRank = (a, b) => (rankOrder[a.rank] ?? 3) - (rankOrder[b.rank] ?? 3);
     const startedToday = Object.values(db.progress).filter((p) => p.history.length && dateOf(p.history[0].t) === today()).length;
     const room = Math.max(0, (db.settings.newPerDay || 0) - startedToday);
-    const due = db.theories.filter((t) => !isNew(t.id) && isDue(t.id))
+    const units = allUnits();
+    const due = units.filter((t) => !isNew(t.id) && isDue(t.id))
       .sort((a, b) => (db.progress[a.id].due || "").localeCompare(db.progress[b.id].due || "") || byRank(a, b));
-    const fresh = db.theories.filter((t) => isNew(t.id)).sort((a, b) => byRank(a, b) || byTitle(a, b)).slice(0, room);
+    const fresh = units.filter((t) => isNew(t.id)).sort((a, b) => byRank(a, b) || byTitle(a, b)).slice(0, room);
     return due.concat(fresh).map((t) => t.id);
   }
   function rate(id, q, mode, score) {
@@ -249,14 +277,24 @@
     if ("speechSynthesis" in window) speechSynthesis.cancel();
     // #study-<id>、#study-<id>-<mode>、#edit-<id>（id に「-」が入ってもよい）
     const raw = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
-    const m = raw.match(/^(study|edit)[-\/](.+)$/);
+    // #sec-<カードid~番号>、#whole-<カードid> も同じ形
+    const m = raw.match(/^(study|edit|sec|whole)[-\/](.+)$/);
     let h = [raw];
     if (m) {
+      const exists = (x) => (m[1] === "sec" ? findUnit(x) : find(x));
       const mm = m[2].match(/^(.+)[-\/](read|cloze|random|initial|write)$/);
-      h = mm && find(mm[1]) ? [m[1], mm[1], mm[2]] : [m[1], m[2]];
+      h = mm && exists(mm[1]) ? [m[1], mm[1], mm[2]] : [m[1], m[2]];
     }
     updateNav();
-    if (h[0] === "study" && find(h[1])) return viewStudy(find(h[1]), h[2] || db.settings.defaultMode);
+    if (h[0] === "study" && find(h[1])) {
+      const us = unitsOf(find(h[1]));
+      return us.length > 1 ? viewProblem(find(h[1])) : viewStudy(us[0], h[2] || db.settings.defaultMode);
+    }
+    if (h[0] === "sec" && findUnit(h[1])) return viewStudy(findUnit(h[1]), h[2] || db.settings.defaultMode);
+    if (h[0] === "whole" && find(h[1])) {
+      const t = find(h[1]);
+      return viewStudy({ id: t.id, card: t, n: 0, title: t.title + "（全体）", body: t.body, rank: t.rank, category: t.category, whole: true }, h[2] || "read");
+    }
     if (h[0] === "edit") return viewEdit(h[1] === "new" ? null : find(h[1]));
     if (h[0] === "review") return viewReview();
     if (h[0] === "data") return viewData();
@@ -284,6 +322,26 @@
     if (isDue(id)) return '<span class="tag due">復習日</span>';
     return '<span class="tag">次回 ' + p.due.slice(5).replace("-", "/") + "</span>";
   }
+  const LEVELS = ["もう一度", "うろ覚え", "完璧"];
+  function lastQ(id) {
+    const p = db.progress[id];
+    return p && p.history.length ? p.history[p.history.length - 1].q : null;
+  }
+  function levelTag(id) {
+    const q = lastQ(id);
+    return q == null ? "" : '<span class="tag lv' + q + '">習熟度：' + LEVELS[q] + "</span>";
+  }
+  // 一覧に出す、問題全体の状態（項目ごとの習熟度を四角で並べる）
+  function cardStatus(t) {
+    const us = unitsOf(t);
+    if (us.length === 1) return statusTag(us[0].id) + histHtml(us[0].id);
+    const fresh = us.filter((u) => isNew(u.id)).length;
+    const due = us.filter((u) => !isNew(u.id) && isDue(u.id)).length;
+    const tag = fresh === us.length ? '<span class="tag">未学習</span>'
+      : due ? '<span class="tag due">復習 ' + due + "項目</span>" : '<span class="tag">学習中</span>';
+    return '<span class="tag">' + us.length + "項目</span>" + tag +
+      '<span class="hist" title="項目ごとの習熟度">' + us.map((u) => { const q = lastQ(u.id); return '<i class="' + (q == null ? "" : "q" + q) + '"></i>'; }).join("") + "</span>";
+  }
   function histHtml(id) {
     const p = db.progress[id];
     if (!p) return "";
@@ -292,14 +350,15 @@
 
   function viewHome() {
     const cats = Array.from(new Set(db.theories.map((t) => t.category).filter(Boolean)));
+    const units = allUnits();
     const total = db.theories.length;
-    const studied = db.theories.filter((t) => db.progress[t.id] && db.progress[t.id].history.length).length;
+    const studied = units.filter((u) => !isNew(u.id)).length;
     const due = todaysQueue().length;
-    const mastered = db.theories.filter((t) => db.progress[t.id] && db.progress[t.id].interval >= 7).length;
+    const mastered = units.filter((u) => db.progress[u.id] && db.progress[u.id].interval >= 7).length;
     app.innerHTML =
       '<div class="stats">' +
       '<div class="stat"><b>' + total + "</b><span>登録理論</span></div>" +
-      '<div class="stat"><b>' + studied + "</b><span>学習済み</span></div>" +
+      '<div class="stat"><b>' + studied + " / " + units.length + "</b><span>学習済みの項目</span></div>" +
       '<div class="stat"><b>' + due + "</b><span>今日の復習</span></div>" +
       '<div class="stat"><b>' + mastered + "</b><span>定着（間隔7日以上）</span></div>" +
       "</div>" +
@@ -321,7 +380,7 @@
         '<div class="card item">' +
         '<div style="flex:1;min-width:0"><a class="title" href="#study-' + t.id + '">' + esc(t.title) + "</a>" +
         '<div class="row muted" style="gap:6px">' + (t.rank ? '<span class="tag r' + t.rank + '">' + t.rank + "</span>" : "") +
-        (t.category ? "<span>" + esc(t.category) + "</span>" : "") + statusTag(t.id) + histHtml(t.id) + "</div></div>" +
+        (t.category ? "<span>" + esc(t.category) + "</span>" : "") + cardStatus(t) + "</div></div>" +
         '<a class="btn" href="#edit-' + t.id + '">編集</a></div>').join("")
         : db.theories.length ? '<div class="empty">該当する理論がありません</div>'
         : '<div class="empty">まだ理論がありません。<br>「データ」→「ファイルから読み込む」で理論テキストのファイルを読み込むか、「＋追加」から登録してください。<br><br><a class="btn primary" href="#data">データ画面へ</a></div>';
@@ -337,27 +396,46 @@
       reviewQueue = todaysQueue();
     }
     updateNav();
-    const next = reviewQueue.find((id) => find(id) && isDue(id));
+    const next = reviewQueue.find((id) => findUnit(id) && isDue(id));
     if (!next) {
       reviewQueue = null;
       app.innerHTML = '<div class="card empty"><h1>今日の復習は完了です</h1><p>おつかれさまでした。</p><a class="btn primary" href="#home">一覧へ戻る</a></div>';
       return;
     }
-    viewStudy(find(next), db.settings.defaultMode, true);
+    viewStudy(findUnit(next), db.settings.defaultMode, true);
+  }
+
+  // 問題を開いたとき：〔1〕〔2〕…の項目を選ぶ画面
+  function viewProblem(t) {
+    const us = unitsOf(t);
+    app.innerHTML =
+      '<div class="row"><a href="#home">← 一覧</a></div>' +
+      "<h1>" + esc(t.title) + "</h1>" +
+      '<div class="row muted">' + (t.rank ? '<span class="tag r' + t.rank + '">' + t.rank + "</span>" : "") + esc(t.category || "") + "</div>" +
+      '<p class="muted">項目を選ぶと、その部分だけを穴埋めで解けます。解いたあとに習熟度を選んでください。</p>' +
+      '<div class="seclist">' + us.map((u) =>
+        '<a class="card item sec" href="#sec-' + u.id + '"><div style="flex:1;min-width:0"><b>' + esc(u.head) + "</b>" +
+        '<div class="row muted" style="gap:6px">' + levelTag(u.id) + statusTag(u.id) + histHtml(u.id) + "</div></div>" +
+        '<span class="chev" aria-hidden="true">›</span></a>').join("") + "</div>" +
+      '<div class="row" style="margin-top:12px"><a class="btn" href="#whole-' + t.id + '-read">全体を通して読む</a><a class="btn" href="#edit-' + t.id + '">編集</a></div>';
   }
 
   function viewStudy(t, mode, inReview) {
     let seed = Math.floor(Math.random() * 1e9);
-    const base = inReview ? "#review" : "#study-" + t.id;
-    const remaining = inReview ? reviewQueue.filter((id) => find(id) && isDue(id)).length : 0;
+    // 【】の印がない本文では、キーワード穴埋めの代わりにランダム穴埋めで開く
+    if (mode === "cloze" && !/【[^】]+】/.test(t.body)) mode = "random";
+    const base = inReview ? "#review" : t.whole ? "#whole-" + t.card.id : t.n ? "#sec-" + t.id : "#study-" + t.id;
+    const back = !inReview && t.n ? "#study-" + t.card.id : t.whole ? "#study-" + t.card.id : "#home";
+    const remaining = inReview ? reviewQueue.filter((id) => findUnit(id) && isDue(id)).length : 0;
     app.innerHTML =
-      '<div class="row"><a href="#home">← 一覧</a><span class="spacer"></span>' +
+      '<div class="row"><a href="' + back + '">' + (back === "#home" ? "← 一覧" : "← 項目の一覧") + '</a><span class="spacer"></span>' +
       (inReview ? '<span class="muted">復習 残り ' + remaining + " 件</span>" : "") + "</div>" +
       "<h1>" + esc(t.title) + "</h1>" +
-      '<div class="row muted">' + (t.rank ? '<span class="tag r' + t.rank + '">' + t.rank + "</span>" : "") + esc(t.category || "") + statusTag(t.id) + histHtml(t.id) + "</div>" +
+      '<div class="row muted">' + (t.rank ? '<span class="tag r' + t.rank + '">' + t.rank + "</span>" : "") + esc(t.category || "") +
+        (t.whole ? "" : levelTag(t.id) + statusTag(t.id) + histHtml(t.id)) + "</div>" +
       '<div class="modes">' + MODES.map(([k, l]) => '<button data-mode="' + k + '" class="' + (k === mode ? "on" : "") + '">' + l + "</button>").join("") + "</div>" +
       '<div class="card" id="stage"></div>' +
-      '<div class="rate">' + RATES.map(([q, l, s]) => '<button data-q="' + q + '">' + l + "<small>" + s + "</small></button>").join("") + "</div>";
+      (t.whole ? "" : '<h2>習熟度を選ぶ</h2><div class="rate">' + RATES.map(([q, l, s]) => '<button data-q="' + q + '">' + l + "<small>" + s + "</small></button>").join("") + "</div>");
 
     app.querySelectorAll("[data-mode]").forEach((b) => {
       b.onclick = () => {
@@ -375,7 +453,8 @@
           if (Number(b.dataset.q) === 0) { reviewQueue = reviewQueue.filter((id) => id !== t.id).concat(t.id); }
           viewReview();
         } else {
-          location.hash = "#home";
+          toast("習熟度を「" + LEVELS[Number(b.dataset.q)] + "」にしました");
+          location.hash = back;
         }
       };
     });
@@ -476,7 +555,7 @@
     if (del) del.onclick = () => {
       ask("「" + t.title + "」を削除しますか？学習記録も消えます。", "削除する", () => {
         db.theories = db.theories.filter((x) => x.id !== t.id);
-        delete db.progress[t.id];
+        Object.keys(db.progress).forEach((k) => { if (k === t.id || k.startsWith(t.id + "~")) delete db.progress[k]; });
         save();
         toast("削除しました");
         location.hash = "#home";
