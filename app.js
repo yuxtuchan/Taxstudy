@@ -66,7 +66,7 @@
     const room = Math.max(0, (db.settings.newPerDay || 0) - startedToday);
     const due = db.theories.filter((t) => !isNew(t.id) && isDue(t.id))
       .sort((a, b) => (db.progress[a.id].due || "").localeCompare(db.progress[b.id].due || "") || byRank(a, b));
-    const fresh = db.theories.filter((t) => isNew(t.id)).sort(byRank).slice(0, room);
+    const fresh = db.theories.filter((t) => isNew(t.id)).sort((a, b) => byRank(a, b) || byTitle(a, b)).slice(0, room);
     return due.concat(fresh).map((t) => t.id);
   }
   function rate(id, q, mode, score) {
@@ -184,12 +184,22 @@
     speechSynthesis.speak(u);
   }
 
-  // 同じ id のカードは追加しない
+  // 同じ id のカードは追加しない。自分で編集していないカードは、題名・分野・ランク・本文を新しい内容に置き換える
+  let lastUpdated = 0;
   function mergeTheories(list, progress) {
     const have = new Set(db.theories.map((t) => t.id));
     let n = 0;
+    lastUpdated = 0;
     list.forEach((t) => {
-      if (!t || !t.id || !t.title || have.has(t.id)) return;
+      if (!t || !t.id || !t.title) return;
+      if (have.has(t.id)) {
+        const cur = find(t.id);
+        if (cur && !cur.updatedAt && (cur.title !== t.title || cur.category !== t.category || cur.rank !== t.rank || cur.body !== t.body)) {
+          Object.assign(cur, { title: t.title, category: t.category || "", rank: t.rank || cur.rank, body: t.body || cur.body });
+          lastUpdated++;
+        }
+        return;
+      }
       db.theories.push({ id: t.id, title: t.title, category: t.category || "", rank: t.rank || "B", body: t.body || "", createdAt: t.createdAt || Date.now() });
       if (progress[t.id]) db.progress[t.id] = progress[t.id];
       have.add(t.id); n++;
@@ -250,6 +260,15 @@
   }
   window.addEventListener("hashchange", route);
 
+  // テキストの問題番号（1-1, 1-2 …）順。番号のないカードは後ろ、「対象外」はさらに後ろ
+  function orderKey(t) {
+    const m = t.title.match(/^(\d+)-(\d+)/);
+    return m ? [0, +m[1], +m[2]] : [/^対象外/.test(t.title) ? 2 : 1, 0, 0];
+  }
+  function byTitle(a, b) {
+    const x = orderKey(a), y = orderKey(b);
+    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2] || a.title.localeCompare(b.title, "ja", { numeric: true });
+  }
   function updateNav() {
     const n = todaysQueue().length;
     document.getElementById("nav-review").textContent = "今日の復習" + (n ? "（" + n + "）" : "");
@@ -289,7 +308,7 @@
     const list = document.getElementById("list");
     function draw() {
       const q = homeFilter.q.trim();
-      const items = db.theories.filter((t) =>
+      const items = db.theories.slice().sort(byTitle).filter((t) =>
         (!q || t.title.includes(q) || plain(t.body).includes(q)) &&
         (!homeFilter.cat || t.category === homeFilter.cat) &&
         (!homeFilter.rank || t.rank === homeFilter.rank));
@@ -488,8 +507,11 @@
     document.getElementById("addjobun").onclick = (e) => {
       e.target.disabled = true;
       fetch("data/jobun.json").then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }).then((d) => {
-        const n = mergeTheories(d.theories, {});
-        toast(n ? "条文カードを" + n + "枚追加しました" : "条文カードはすべて追加済みです");
+        // 題名を取り込み済みのカードは、ここでは題名を戻さない
+        const keep = new Map(db.theories.map((t) => [t.id, t]));
+        const list = d.theories.map((t) => keep.has(t.id) ? Object.assign({}, t, { title: keep.get(t.id).title, category: keep.get(t.id).category }) : t);
+        const n = mergeTheories(list, {});
+        toast(n ? "条文カードを" + n + "枚追加しました" : lastUpdated ? "条文カード" + lastUpdated + "枚を最新の条文に更新しました" : "条文カードはすべて追加済みです");
         if (n) location.hash = "#home";
       }).catch(() => toast("条文データを読み込めませんでした。通信状態を確かめて、もう一度押してください"))
         .finally(() => { e.target.disabled = false; });
@@ -537,7 +559,7 @@
           location.hash = "#home";
         }, { label: "追加する", fn: () => {
           const n = mergeTheories(d.theories, d.progress || {});
-          toast(n + "件追加しました（同じカードは追加していません）");
+          toast(n + "件追加" + (lastUpdated ? "、" + lastUpdated + "件の題名などを更新" : "") + "しました");
           location.hash = "#home";
         } });
       }
