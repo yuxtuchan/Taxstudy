@@ -21,7 +21,6 @@
     try { s = JSON.parse(localStorage.getItem(STORE_KEY)); } catch (e) { s = null; }
     if (!s || !Array.isArray(s.theories)) {
       s = { theories: [], progress: {}, settings: {} };
-      (window.SAMPLE_THEORIES || []).forEach((t) => s.theories.push(Object.assign({ id: uid(), createdAt: Date.now() }, t)));
     }
     s.progress = s.progress || {};
     s.settings = Object.assign({ blankRatio: 0.4, ttsRate: 1.0, defaultMode: "cloze", newPerDay: 10 }, s.settings || {});
@@ -184,6 +183,12 @@
     speechSynthesis.speak(u);
   }
 
+  // 以前の版で入った条文カード（id が jobun-）と、編集していない初期サンプル
+  const OLD_SAMPLES = ["課税の対象", "納税義務者", "資産の譲渡等の意義", "基準期間の意義", "小規模事業者に係る納税義務の免除"];
+  function legacyCards() {
+    return db.theories.filter((t) => String(t.id).startsWith("jobun-") || (!t.updatedAt && OLD_SAMPLES.includes(t.title)));
+  }
+
   // 同じ id のカードは追加しない。自分で編集していないカードは、題名・分野・ランク・本文を新しい内容に置き換える
   let lastUpdated = 0;
   function mergeTheories(list, progress) {
@@ -318,7 +323,8 @@
         '<div class="row muted" style="gap:6px">' + (t.rank ? '<span class="tag r' + t.rank + '">' + t.rank + "</span>" : "") +
         (t.category ? "<span>" + esc(t.category) + "</span>" : "") + statusTag(t.id) + histHtml(t.id) + "</div></div>" +
         '<a class="btn" href="#edit-' + t.id + '">編集</a></div>').join("")
-        : '<div class="empty">該当する理論がありません</div>';
+        : db.theories.length ? '<div class="empty">該当する理論がありません</div>'
+        : '<div class="empty">まだ理論がありません。<br>「データ」→「ファイルから読み込む」で理論テキストのファイルを読み込むか、「＋追加」から登録してください。<br><br><a class="btn primary" href="#data">データ画面へ</a></div>';
     }
     document.getElementById("q").oninput = (e) => { homeFilter.q = e.target.value; draw(); };
     document.getElementById("cat").onchange = (e) => { homeFilter.cat = e.target.value; draw(); };
@@ -487,9 +493,9 @@
         [0, 5, 10, 15, 20, 30, 50].map((n) => '<option value="' + n + '"' + (n === db.settings.newPerDay ? " selected" : "") + ">" + n + "枚</option>").join("") + "</select>" +
       '<label>読み上げ速度：<span id="rv">' + db.settings.ttsRate + '</span></label><input type="range" id="rate" min="0.5" max="2" step="0.1" value="' + db.settings.ttsRate + '" style="width:100%">' +
       "</div>" +
-      '<div class="card"><h2 style="margin-top:0">条文カード</h2>' +
-      '<p class="muted">消費税法の本則（全条文）と別表を、条・項ごとのカードにしたものです。理論テキストで★★の規定はランクA、★はB、それ以外はCになっています。いまのデータに追加されます（追加済みのカードは重複しません）。</p>' +
-      '<div class="row"><button class="primary" id="addjobun">消費税法の条文カードを追加</button></div></div>' +
+      (legacyCards().length ? '<div class="card"><h2 style="margin-top:0">条文カード・サンプルの削除</h2>' +
+        '<p class="muted">以前の版で入った、消費税法の条文から作ったカードと、最初から入っていたサンプルが ' + legacyCards().length + ' 枚あります。理論テキストのカードと、自分で編集したカードは消えません。</p>' +
+        '<div class="row"><button class="danger" id="dellegacy">条文カードとサンプルを削除</button></div></div>' : "") +
       '<div class="card"><h2 style="margin-top:0">バックアップ</h2>' +
       '<p class="muted">データはこのブラウザの中だけに保存されます。機種変更やブラウザのデータ削除に備えて、ときどき書き出してください。</p>' +
       '<div class="row"><button class="primary" id="exp">バックアップを表示</button><button id="dl">ファイルに保存</button><label class="btn" style="margin:0;color:var(--text)">ファイルから読み込む<input type="file" id="imp" accept=".json,application/json" hidden></label></div>' +
@@ -502,19 +508,19 @@
       '<p class="muted">「# 題名」の行で理論を区切って貼り付けます。題名の後ろに「｜分野｜ランク」を付けられます。<br>例：<code># 課税の対象｜総則｜A</code></p>' +
       '<textarea id="bulk" style="min-height:160px" placeholder="# 題名｜分野｜A\n本文……\n\n# 次の題名\n本文……"></textarea>' +
       '<div class="row" style="margin-top:8px"><button id="bulkadd">追加する</button></div></div>' +
-      '<div class="card"><h2 style="margin-top:0">リセット</h2><div class="row"><button class="danger" id="resetp">学習記録だけ消す</button><button class="danger" id="resetall">すべて消してサンプルに戻す</button></div></div>';
+      '<div class="card"><h2 style="margin-top:0">リセット</h2><div class="row"><button class="danger" id="resetp">学習記録だけ消す</button><button class="danger" id="resetall">すべて消す</button></div></div>';
     document.getElementById("npd").onchange = (e) => { db.settings.newPerDay = Number(e.target.value); reviewQueue = null; save(); };
-    document.getElementById("addjobun").onclick = (e) => {
-      e.target.disabled = true;
-      fetch("data/jobun.json").then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }).then((d) => {
-        // 題名を取り込み済みのカードは、ここでは題名を戻さない
-        const keep = new Map(db.theories.map((t) => [t.id, t]));
-        const list = d.theories.map((t) => keep.has(t.id) ? Object.assign({}, t, { title: keep.get(t.id).title, category: keep.get(t.id).category }) : t);
-        const n = mergeTheories(list, {});
-        toast(n ? "条文カードを" + n + "枚追加しました" : lastUpdated ? "条文カード" + lastUpdated + "枚を最新の条文に更新しました" : "条文カードはすべて追加済みです");
-        if (n) location.hash = "#home";
-      }).catch(() => toast("条文データを読み込めませんでした。通信状態を確かめて、もう一度押してください"))
-        .finally(() => { e.target.disabled = false; });
+    const dl = document.getElementById("dellegacy");
+    if (dl) dl.onclick = () => {
+      const ids = new Set(legacyCards().map((t) => t.id));
+      ask("条文カードとサンプル " + ids.size + " 枚を削除しますか？学習記録も消えます。", "削除する", () => {
+        db.theories = db.theories.filter((t) => !ids.has(t.id));
+        ids.forEach((id) => delete db.progress[id]);
+        reviewQueue = null;
+        save();
+        toast(ids.size + "枚削除しました");
+        location.hash = "#home";
+      });
     };
     document.getElementById("dm").onchange = (e) => { db.settings.defaultMode = e.target.value; save(); };
     document.getElementById("rate").oninput = (e) => { db.settings.ttsRate = Number(e.target.value); document.getElementById("rv").textContent = e.target.value; save(); };
@@ -587,7 +593,7 @@
     document.getElementById("resetall").onclick = () => {
       ask("登録した理論も含めてすべて消えます。よろしいですか？", "すべて消す", () => {
         try { localStorage.removeItem(STORE_KEY); } catch (e) { /* 無視 */ }
-        db = load(); save(); toast("サンプルの状態に戻しました"); location.hash = "#home";
+        db = load(); save(); toast("すべて消しました"); location.hash = "#home";
       });
     };
   }
