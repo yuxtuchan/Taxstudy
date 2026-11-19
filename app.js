@@ -17,6 +17,9 @@
   function load() {
     let s = null;
     try { s = JSON.parse(localStorage.getItem(STORE_KEY)); } catch (e) { s = null; }
+    return normalize(s);
+  }
+  function normalize(s) {
     if (!s || !Array.isArray(s.theories)) {
       s = { theories: [], progress: {}, settings: {} };
     }
@@ -27,10 +30,89 @@
     return s;
   }
   let db = load();
-  function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); } catch (e) { toast("保存に失敗しました。ブラウザの保存領域が使えません"); }
+  function writeLocal() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); return true; } catch (e) { return false; }
   }
-  save();
+  function save() {
+    db.savedAt = Date.now();
+    const ok = writeLocal();
+    if (cloud) cloudPush();
+    else if (!ok) toast("保存に失敗しました。ブラウザの保存領域が使えません");
+  }
+
+  // ---------- claude.ai 版：claude.ai アカウント側（本人だけが読める場所）にも保存 ----------
+  // ブラウザの保存領域は、アプリの中で開くと毎回空になることがあるため。
+  // 1つの保存単位は 256KB までなので、データを分けて保存する。
+  let cloud = null;            // { db, base }
+  let cloudState = "local";    // local | loading | synced | error
+  const CHUNK_CHARS = 60000;   // 日本語は1文字3バイトなので約180KB
+  let pushing = false, pushAgain = false, pushTimer = null;
+  function withTimeout(p, ms) {
+    return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej({ code: "timeout" }), ms))]);
+  }
+  async function cloudInit() {
+    const c = window.claude;
+    if (!c || typeof c.use !== "function") return;
+    cloudState = "loading";
+    try {
+      const [cdb, user] = await Promise.all([c.use("db"), c.use("user")]);
+      const id = cdb && user ? await user.id() : null;
+      if (!id) { cloudState = "local"; return; }
+      const base = "data/users/" + id;
+      const meta = await withTimeout(cdb.doc(base + "/meta").get(), 10000);
+      cloud = { db: cdb, base: base };
+      if (meta.exists) {
+        const m = meta.data();
+        const parts = [];
+        for (let i = 0; i < m.chunks; i++) {
+          const d = await withTimeout(cdb.doc(base + "/chunk" + i).get(), 10000);
+          parts.push(d.exists ? d.data().s : "");
+        }
+        const remote = JSON.parse(parts.join(""));
+        if (remote && Array.isArray(remote.theories) && (!db.theories.length || (m.savedAt || 0) >= (db.savedAt || 0))) {
+          db = normalize(remote);
+          db.savedAt = m.savedAt || 0;
+          writeLocal();
+          reviewQueue = null;
+          cloudState = "synced";
+          route();
+          return;
+        }
+      }
+      cloudState = "synced";
+      if (db.theories.length) cloudPush(true);
+    } catch (e) {
+      cloud = null;
+      cloudState = "error";
+    }
+  }
+  function cloudPush(now) {
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(doPush, now ? 0 : 1200);
+  }
+  async function doPush() {
+    if (!cloud) return;
+    if (pushing) { pushAgain = true; return; }
+    pushing = true;
+    try {
+      const text = JSON.stringify(db);
+      const n = Math.max(1, Math.ceil(text.length / CHUNK_CHARS));
+      const old = await cloud.db.doc(cloud.base + "/meta").get();
+      const oldN = old.exists ? old.data().chunks || 0 : 0;
+      for (let i = 0; i < n; i++) {
+        await cloud.db.doc(cloud.base + "/chunk" + i).set({ s: text.slice(i * CHUNK_CHARS, (i + 1) * CHUNK_CHARS) });
+      }
+      await cloud.db.doc(cloud.base + "/meta").set({ chunks: n, savedAt: db.savedAt || Date.now() });
+      for (let i = n; i < oldN; i++) await cloud.db.doc(cloud.base + "/chunk" + i).delete();
+      cloudState = "synced";
+    } catch (e) {
+      cloudState = "error";
+      toast("claude.ai への保存に失敗しました。このブラウザには保存してあります");
+    } finally {
+      pushing = false;
+      if (pushAgain) { pushAgain = false; cloudPush(true); }
+    }
+  }
 
   // ---------- 日付・間隔反復 ----------
   function today() {
@@ -560,7 +642,7 @@
         '<p class="muted">以前の版で入った、消費税法の条文から作ったカードと、最初から入っていたサンプルが ' + legacyCards().length + ' 枚あります。理論テキストのカードと、自分で編集したカードは消えません。</p>' +
         '<div class="row"><button class="danger" id="dellegacy">条文カードとサンプルを削除</button></div></div>' : "") +
       '<div class="card"><h2 style="margin-top:0">バックアップ</h2>' +
-      '<p class="muted">データはこのブラウザの中だけに保存されます。機種変更やブラウザのデータ削除に備えて、ときどき書き出してください。</p>' +
+      '<p class="muted">' + (cloud ? "データは claude.ai のアカウントにも保存されています（本人だけが読めます）。" : cloudState === "error" ? "claude.ai への保存ができていません。データはこのブラウザの中だけにあります。" : "データはこのブラウザの中だけに保存されます。") + "機種変更やブラウザのデータ削除に備えて、ときどき書き出してください。</p>" +
       '<div class="row"><button class="primary" id="exp">バックアップを表示</button><button id="dl">ファイルに保存</button><label class="btn" style="margin:0;color:var(--text)">ファイルから読み込む<input type="file" id="imp" accept=".json,application/json" hidden></label></div>' +
       '<div id="expbox" hidden><label for="exptext">下の文字列をメモアプリなどに貼り付けて保管してください</label><textarea id="exptext" style="min-height:120px;font-size:12px" readonly></textarea>' +
       '<div class="row" style="margin-top:6px"><button id="copy">コピー</button></div></div>' +
@@ -661,4 +743,5 @@
   }
 
   route();
+  cloudInit();
 })();
